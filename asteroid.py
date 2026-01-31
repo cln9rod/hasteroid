@@ -40,8 +40,8 @@ class Asteroid(CircleShape, PooledSprite):
         self.debris_data = kwargs.get("debris_data")
         self.norad_id = kwargs.get("norad_id")
         
-        # Re-add to containers
-        for container in self.containers:
+        # Re-add to sprite groups (explicit class reference)
+        for container in Asteroid.containers:
             container.add(self)
         
         return self
@@ -71,27 +71,30 @@ class Asteroid(CircleShape, PooledSprite):
         """
         self._alive = False
         
-        # Return to pool instead of kill
+        if self.radius <= ASTEROID_MIN_RADIUS:
+            if self._pool:
+                self.release()
+            else:
+                self.kill()
+            return []
+        
+        # Save state BEFORE releasing (pool might reuse this object)
+        pos_x, pos_y = self.position.x, self.position.y
+        old_velocity = self.velocity.copy()
+        new_radius = self.radius - ASTEROID_MIN_RADIUS
+        angle = random.uniform(20, 50)
+        
+        # Now safe to release
         if self._pool:
             self.release()
         else:
             self.kill()
         
-        if self.radius <= ASTEROID_MIN_RADIUS:
-            return []
-        
         # Spawn two smaller asteroids
-        new_radius = self.radius - ASTEROID_MIN_RADIUS
-        angle = random.uniform(20, 50)
-        
         children = []
         for angle_offset in (angle, -angle):
-            if self._pool:
-                child = Asteroid.acquire(self.position.x, self.position.y, new_radius)
-            else:
-                child = Asteroid(self.position.x, self.position.y, new_radius)
-            
-            child.velocity = self.velocity.rotate(angle_offset) * 1.2
+            child = Asteroid.acquire(pos_x, pos_y, new_radius)
+            child.velocity = old_velocity.rotate(angle_offset) * 1.2
             children.append(child)
         
         return children

@@ -27,8 +27,8 @@ class Shot(CircleShape, PooledSprite):
         self._alive = True
         self._lifetime = 0.0
         
-        # Re-add to containers
-        for container in self.containers:
+        # Re-add to sprite groups (explicit class reference)
+        for container in Shot.containers:
             container.add(self)
         
         return self

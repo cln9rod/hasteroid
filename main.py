@@ -26,6 +26,12 @@ def main():
     asteroids = pygame.sprite.Group()
     shots = pygame.sprite.Group()
     
+    # Set sprite containers FIRST (before pools prewarm)
+    Asteroid.containers = (asteroids, updatable, drawable)
+    Player.containers = (updatable, drawable)
+    AsteroidField.containers = (updatable,)
+    Shot.containers = (updatable, drawable, shots)
+    
     # Spatial hash: cell size >= 2 * max entity radius
     spatial = SpatialHash(cell_size=ASTEROID_MAX_RADIUS * 2 + 32)
     
@@ -44,12 +50,6 @@ def main():
     # Assign pools to classes
     Asteroid.set_pool(asteroid_pool)
     Shot.set_pool(shot_pool)
-    
-    # Set sprite containers
-    Asteroid.containers = (asteroids, updatable, drawable)
-    Player.containers = (updatable, drawable)
-    AsteroidField.containers = (updatable,)
-    Shot.containers = (updatable, drawable, shots)
     
     # Create entities
     player = Player(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
