@@ -23,6 +23,8 @@ class Asteroid(CircleShape, PooledSprite):
         CircleShape.__init__(self, x, y, radius)
         self.radius = radius
         self._alive = True
+        self._scanned = False       # Quick scan done
+        self._full_scanned = False  # Full scan done
         
         # Future: debris metadata
         self.debris_data = None
@@ -37,6 +39,8 @@ class Asteroid(CircleShape, PooledSprite):
         if radius is not None:
             self.radius = radius
         self._alive = True
+        self._scanned = False
+        self._full_scanned = False
         self.debris_data = kwargs.get("debris_data")
         self.norad_id = kwargs.get("norad_id")
         
@@ -57,8 +61,23 @@ class Asteroid(CircleShape, PooledSprite):
             return cls(x, y, radius)
     
     def draw(self, screen) -> None:
-        if self._alive:
-            pygame.draw.circle(screen, "white", self.position, self.radius, LINE_WIDTH)
+        if not self._alive:
+            return
+        
+        # Color based on scan state
+        if self._full_scanned:
+            color = (0, 255, 0)  # Green = fully scanned
+        elif self._scanned:
+            color = (0, 200, 255)  # Cyan = quick scanned
+        else:
+            color = "white"
+        
+        pygame.draw.circle(screen, color, self.position, self.radius, LINE_WIDTH)
+        
+        # Draw scan marker
+        if self._scanned:
+            marker_size = 3
+            pygame.draw.circle(screen, color, self.position, marker_size)
     
     def update(self, dt: float) -> None:
         if self._alive:

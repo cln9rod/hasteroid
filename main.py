@@ -5,7 +5,10 @@ Uses spatial hashing for O(n) average collision checks.
 import sys
 import pygame
 
-from constants import SCREEN_HEIGHT, SCREEN_WIDTH, ASTEROID_MAX_RADIUS
+from constants import (
+    SCREEN_HEIGHT, SCREEN_WIDTH, ASTEROID_MAX_RADIUS,
+    SCAN_RANGE, SCAN_POINTS_QUICK, SCAN_POINTS_FULL, DESTROY_POINTS
+)
 from core import SpatialHash, ObjectPool
 from player import Player
 from asteroid import Asteroid
@@ -19,6 +22,7 @@ def main():
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("AstroTag")
     clock = pygame.time.Clock()
+    font = pygame.font.Font(None, 36)
     
     # Sprite groups
     updatable = pygame.sprite.Group()
@@ -55,12 +59,14 @@ def main():
     player = Player(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
     asteroid_field = AsteroidField()
     
+    # Game state
+    score = 0
+    scans_quick = 0
+    scans_full = 0
+    destroys = 0
+    
     dt = 0
     running = True
-    
-    # Performance tracking
-    frame_count = 0
-    collision_checks = 0
     
     while running:
         log_state()
@@ -77,46 +83,60 @@ def main():
         dt = clock.tick(60) / 1000
         updatable.update(dt)
         
-        # --- Optimized collision detection ---
-        # Rebuild spatial hash (entities moved)
-        spatial.clear()
+        # --- Scan targeting ---
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_e]:
+            nearest = _find_nearest_asteroid(player, asteroids, SCAN_RANGE)
+            if nearest:
+                player.set_scan_target(nearest)
         
-        # Insert all collidables
+        # Handle scan completion
+        if player.last_scan_result:
+            scan_type, asteroid = player.last_scan_result
+            if scan_type == "full":
+                score += SCAN_POINTS_FULL
+                scans_full += 1
+                log_event("scan_full", norad_id=asteroid.norad_id)
+            elif scan_type == "quick":
+                score += SCAN_POINTS_QUICK
+                scans_quick += 1
+                log_event("scan_quick", norad_id=asteroid.norad_id)
+        
+        # --- Optimized collision detection ---
+        spatial.clear()
         for asteroid in asteroids:
             spatial.insert(asteroid)
         for shot in shots:
             spatial.insert(shot)
         spatial.insert(player)
         
-        # Check shot-asteroid collisions (O(n) average)
-        collision_checks = 0
+        # Check shot-asteroid collisions
         shots_to_remove = []
         asteroids_to_split = []
         
         for shot in shots:
-            # Only check nearby asteroids
             for asteroid in spatial.query(shot):
                 if not isinstance(asteroid, Asteroid):
                     continue
-                collision_checks += 1
                 if shot.collides_with(asteroid):
                     log_event("asteroid_shot", norad_id=asteroid.norad_id)
                     shots_to_remove.append(shot)
                     asteroids_to_split.append(asteroid)
-                    break  # Shot can only hit one asteroid
+                    score += DESTROY_POINTS
+                    destroys += 1
+                    break
         
         # Check player-asteroid collision
         for asteroid in spatial.query(player):
             if not isinstance(asteroid, Asteroid):
                 continue
-            collision_checks += 1
             if asteroid.collides_with(player):
-                log_event("player_hit")
-                print("Game over!")
+                log_event("player_hit", final_score=score)
+                print(f"Game over! Score: {score}")
                 running = False
                 break
         
-        # Process collisions (deferred to avoid mutation during iteration)
+        # Process collisions
         for shot in shots_to_remove:
             shot.release()
         for asteroid in asteroids_to_split:
@@ -127,28 +147,71 @@ def main():
         for sprite in drawable:
             sprite.draw(screen)
         
-        # Debug HUD (optional)
-        if pygame.key.get_pressed()[pygame.K_F1]:
-            _draw_debug_hud(screen, clock, spatial, asteroid_pool, shot_pool, collision_checks)
+        # HUD
+        _draw_hud(screen, font, score, scans_quick, scans_full, destroys)
+        
+        # Debug HUD (F1)
+        if keys[pygame.K_F1]:
+            _draw_debug_hud(screen, clock, spatial, asteroid_pool, shot_pool)
         
         pygame.display.flip()
-        frame_count += 1
     
     pygame.quit()
     sys.exit()
 
 
-def _draw_debug_hud(screen, clock, spatial, asteroid_pool, shot_pool, checks):
-    """Performance overlay - press F1 to toggle."""
+def _find_nearest_asteroid(player, asteroids, max_range):
+    """Find closest asteroid within scan range."""
+    nearest = None
+    nearest_dist = max_range
+    
+    for asteroid in asteroids:
+        if not asteroid._alive:
+            continue
+        dist = player.position.distance_to(asteroid.position)
+        if dist < nearest_dist:
+            nearest_dist = dist
+            nearest = asteroid
+    
+    return nearest
+
+
+def _draw_hud(screen, font, score, scans_q, scans_f, destroys):
+    """Draw score and stats."""
+    # Score (top center)
+    score_text = font.render(f"SCORE: {score}", True, (255, 255, 255))
+    score_rect = score_text.get_rect(midtop=(SCREEN_WIDTH // 2, 10))
+    screen.blit(score_text, score_rect)
+    
+    # Stats (top right)
+    small_font = pygame.font.Font(None, 24)
+    stats = [
+        f"Scans: {scans_q + scans_f} ({scans_f} full)",
+        f"Destroys: {destroys}",
+    ]
+    y = 10
+    for stat in stats:
+        surf = small_font.render(stat, True, (150, 150, 150))
+        rect = surf.get_rect(topright=(SCREEN_WIDTH - 10, y))
+        screen.blit(surf, rect)
+        y += 20
+    
+    # Controls hint (bottom)
+    hint = small_font.render("WASD: move | SPACE: shoot | E: scan | F1: debug", True, (80, 80, 80))
+    hint_rect = hint.get_rect(midbottom=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 10))
+    screen.blit(hint, hint_rect)
+
+
+def _draw_debug_hud(screen, clock, spatial, asteroid_pool, shot_pool):
+    """Performance overlay."""
     font = pygame.font.Font(None, 24)
     lines = [
         f"FPS: {clock.get_fps():.1f}",
         f"Asteroids: {asteroid_pool.active} (pool: {asteroid_pool.available})",
         f"Shots: {shot_pool.active} (pool: {shot_pool.available})",
         f"Spatial cells: {spatial.cell_count}",
-        f"Collision checks: {checks}",
     ]
-    y = 10
+    y = 50
     for line in lines:
         surf = font.render(line, True, (0, 255, 0))
         screen.blit(surf, (10, y))
