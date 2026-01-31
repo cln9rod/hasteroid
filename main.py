@@ -10,6 +10,7 @@ from constants import (
     SCAN_RANGE, SCAN_POINTS_QUICK, SCAN_POINTS_FULL, DESTROY_POINTS
 )
 from core import SpatialHash, ObjectPool
+from crypto import GameSession
 from player import Player
 from asteroid import Asteroid
 from asteroidfield import AsteroidField
@@ -30,16 +31,18 @@ def main():
     asteroids = pygame.sprite.Group()
     shots = pygame.sprite.Group()
     
-    # Set sprite containers FIRST (before pools prewarm)
-    Asteroid.containers = (asteroids, updatable, drawable)
+    # Set player/field containers (pools handle asteroid/shot containers)
     Player.containers = (updatable, drawable)
     AsteroidField.containers = (updatable,)
-    Shot.containers = (updatable, drawable, shots)
     
     # Spatial hash: cell size >= 2 * max entity radius
     spatial = SpatialHash(cell_size=ASTEROID_MAX_RADIUS * 2 + 32)
     
-    # Object pools - preallocate to avoid runtime allocation
+    # Object pools - create sprites properly, then remove from groups
+    # Temporarily clear containers during pool prewarm
+    Asteroid.containers = ()
+    Shot.containers = ()
+    
     asteroid_pool = ObjectPool(
         factory=lambda: Asteroid(0, 0, 20),
         initial=100,
@@ -51,6 +54,10 @@ def main():
         max_size=200
     )
     
+    # Now set real containers
+    Asteroid.containers = (asteroids, updatable, drawable)
+    Shot.containers = (updatable, drawable, shots)
+    
     # Assign pools to classes
     Asteroid.set_pool(asteroid_pool)
     Shot.set_pool(shot_pool)
@@ -59,11 +66,8 @@ def main():
     player = Player(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
     asteroid_field = AsteroidField()
     
-    # Game state
-    score = 0
-    scans_quick = 0
-    scans_full = 0
-    destroys = 0
+    # Game state - use signed session
+    session = GameSession()  # In production, pass server-provided key
     
     dt = 0
     running = True
@@ -94,12 +98,12 @@ def main():
         if player.last_scan_result:
             scan_type, asteroid = player.last_scan_result
             if scan_type == "full":
-                score += SCAN_POINTS_FULL
-                scans_full += 1
+                session.add_score(SCAN_POINTS_FULL)
+                session.record_scan("full", asteroid.norad_id)
                 log_event("scan_full", norad_id=asteroid.norad_id)
             elif scan_type == "quick":
-                score += SCAN_POINTS_QUICK
-                scans_quick += 1
+                session.add_score(SCAN_POINTS_QUICK)
+                session.record_scan("quick", asteroid.norad_id)
                 log_event("scan_quick", norad_id=asteroid.norad_id)
         
         # --- Optimized collision detection ---
@@ -122,8 +126,8 @@ def main():
                     log_event("asteroid_shot", norad_id=asteroid.norad_id)
                     shots_to_remove.append(shot)
                     asteroids_to_split.append(asteroid)
-                    score += DESTROY_POINTS
-                    destroys += 1
+                    session.add_score(DESTROY_POINTS)
+                    session.record_destroy(asteroid.norad_id)
                     break
         
         # Check player-asteroid collision
@@ -131,8 +135,11 @@ def main():
             if not isinstance(asteroid, Asteroid):
                 continue
             if asteroid.collides_with(player):
-                log_event("player_hit", final_score=score)
-                print(f"Game over! Score: {score}")
+                session.record_death()
+                packet = session.create_packet()
+                log_event("player_hit", final_score=session.score)
+                print(f"Game over! Score: {session.score}")
+                print(f"Signed packet: {packet.to_json()}")
                 running = False
                 break
         
@@ -148,7 +155,7 @@ def main():
             sprite.draw(screen)
         
         # HUD
-        _draw_hud(screen, font, score, scans_quick, scans_full, destroys)
+        _draw_hud(screen, font, session)
         
         # Debug HUD (F1)
         if keys[pygame.K_F1]:
@@ -176,18 +183,20 @@ def _find_nearest_asteroid(player, asteroids, max_range):
     return nearest
 
 
-def _draw_hud(screen, font, score, scans_q, scans_f, destroys):
+def _draw_hud(screen, font, session):
     """Draw score and stats."""
     # Score (top center)
-    score_text = font.render(f"SCORE: {score}", True, (255, 255, 255))
+    score_text = font.render(f"SCORE: {session.score}", True, (255, 255, 255))
     score_rect = score_text.get_rect(midtop=(SCREEN_WIDTH // 2, 10))
     screen.blit(score_text, score_rect)
     
     # Stats (top right)
     small_font = pygame.font.Font(None, 24)
+    total_scans = session.scans_quick + session.scans_full
     stats = [
-        f"Scans: {scans_q + scans_f} ({scans_f} full)",
-        f"Destroys: {destroys}",
+        f"Scans: {total_scans} ({session.scans_full} full)",
+        f"Destroys: {session.destroys}",
+        f"Session: {session.session_id}",
     ]
     y = 10
     for stat in stats:
