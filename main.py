@@ -1,5 +1,5 @@
 """
-AstroTag - Main game loop with optimized collision detection.
+AstroTag - Main game loop with CelesTrak debris integration.
 Uses spatial hashing for O(n) average collision checks.
 """
 import sys
@@ -11,6 +11,7 @@ from constants import (
 )
 from core import SpatialHash, ObjectPool
 from crypto import GameSession
+from celestrak import DebrisFetcher
 from player import Player
 from asteroid import Asteroid
 from asteroidfield import AsteroidField
@@ -25,21 +26,24 @@ def main():
     clock = pygame.time.Clock()
     font = pygame.font.Font(None, 36)
     
+    # Initialize debris fetcher (use mock=False for real API)
+    print("[AstroTag] Initializing CelesTrak fetcher...")
+    debris_fetcher = DebrisFetcher(use_mock=True)
+    print(f"[AstroTag] Loaded {debris_fetcher.count} debris objects")
+    
     # Sprite groups
     updatable = pygame.sprite.Group()
     drawable = pygame.sprite.Group()
     asteroids = pygame.sprite.Group()
     shots = pygame.sprite.Group()
     
-    # Set player/field containers (pools handle asteroid/shot containers)
     Player.containers = (updatable, drawable)
     AsteroidField.containers = (updatable,)
     
-    # Spatial hash: cell size >= 2 * max entity radius
+    # Spatial hash
     spatial = SpatialHash(cell_size=ASTEROID_MAX_RADIUS * 2 + 32)
     
-    # Object pools - create sprites properly, then remove from groups
-    # Temporarily clear containers during pool prewarm
+    # Object pools
     Asteroid.containers = ()
     Shot.containers = ()
     
@@ -54,20 +58,18 @@ def main():
         max_size=200
     )
     
-    # Now set real containers
     Asteroid.containers = (asteroids, updatable, drawable)
     Shot.containers = (updatable, drawable, shots)
     
-    # Assign pools to classes
     Asteroid.set_pool(asteroid_pool)
     Shot.set_pool(shot_pool)
     
-    # Create entities
+    # Create entities (pass debris fetcher to field)
     player = Player(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
-    asteroid_field = AsteroidField()
+    asteroid_field = AsteroidField(debris_fetcher)
     
-    # Game state - use signed session
-    session = GameSession()  # In production, pass server-provided key
+    # Game state
+    session = GameSession()
     
     dt = 0
     running = True
@@ -75,7 +77,6 @@ def main():
     while running:
         log_state()
         
-        # Event handling
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -83,11 +84,10 @@ def main():
                 if event.key == pygame.K_ESCAPE:
                     running = False
         
-        # Update all entities
         dt = clock.tick(60) / 1000
         updatable.update(dt)
         
-        # --- Scan targeting ---
+        # Scan targeting
         keys = pygame.key.get_pressed()
         if keys[pygame.K_e]:
             nearest = _find_nearest_asteroid(player, asteroids, SCAN_RANGE)
@@ -100,13 +100,14 @@ def main():
             if scan_type == "full":
                 session.add_score(SCAN_POINTS_FULL)
                 session.record_scan("full", asteroid.norad_id)
-                log_event("scan_full", norad_id=asteroid.norad_id)
+                log_event("scan_full", norad_id=asteroid.norad_id, 
+                         debris_name=asteroid.debris_data.get("name") if asteroid.debris_data else None)
             elif scan_type == "quick":
                 session.add_score(SCAN_POINTS_QUICK)
                 session.record_scan("quick", asteroid.norad_id)
                 log_event("scan_quick", norad_id=asteroid.norad_id)
         
-        # --- Optimized collision detection ---
+        # Optimized collision detection
         spatial.clear()
         for asteroid in asteroids:
             spatial.insert(asteroid)
@@ -114,7 +115,6 @@ def main():
             spatial.insert(shot)
         spatial.insert(player)
         
-        # Check shot-asteroid collisions
         shots_to_remove = []
         asteroids_to_split = []
         
@@ -130,7 +130,6 @@ def main():
                     session.record_destroy(asteroid.norad_id)
                     break
         
-        # Check player-asteroid collision
         for asteroid in spatial.query(player):
             if not isinstance(asteroid, Asteroid):
                 continue
@@ -138,28 +137,31 @@ def main():
                 session.record_death()
                 packet = session.create_packet()
                 log_event("player_hit", final_score=session.score)
-                print(f"Game over! Score: {session.score}")
+                print(f"\n=== GAME OVER ===")
+                print(f"Score: {session.score}")
+                print(f"Scans: {session.scans_quick + session.scans_full}")
                 print(f"Signed packet: {packet.to_json()}")
                 running = False
                 break
         
-        # Process collisions
         for shot in shots_to_remove:
             shot.release()
         for asteroid in asteroids_to_split:
             asteroid.split()
         
-        # --- Render ---
+        # Render
         screen.fill("black")
         for sprite in drawable:
             sprite.draw(screen)
         
-        # HUD
         _draw_hud(screen, font, session)
         
-        # Debug HUD (F1)
         if keys[pygame.K_F1]:
             _draw_debug_hud(screen, clock, spatial, asteroid_pool, shot_pool)
+        
+        # F2: Show debris info for nearest scanned asteroid
+        if keys[pygame.K_F2]:
+            _draw_debris_info(screen, player, asteroids)
         
         pygame.display.flip()
     
@@ -168,7 +170,6 @@ def main():
 
 
 def _find_nearest_asteroid(player, asteroids, max_range):
-    """Find closest asteroid within scan range."""
     nearest = None
     nearest_dist = max_range
     
@@ -184,13 +185,10 @@ def _find_nearest_asteroid(player, asteroids, max_range):
 
 
 def _draw_hud(screen, font, session):
-    """Draw score and stats."""
-    # Score (top center)
     score_text = font.render(f"SCORE: {session.score}", True, (255, 255, 255))
     score_rect = score_text.get_rect(midtop=(SCREEN_WIDTH // 2, 10))
     screen.blit(score_text, score_rect)
     
-    # Stats (top right)
     small_font = pygame.font.Font(None, 24)
     total_scans = session.scans_quick + session.scans_full
     stats = [
@@ -205,14 +203,12 @@ def _draw_hud(screen, font, session):
         screen.blit(surf, rect)
         y += 20
     
-    # Controls hint (bottom)
-    hint = small_font.render("WASD: move | SPACE: shoot | E: scan | F1: debug", True, (80, 80, 80))
+    hint = small_font.render("WASD: move | SPACE: shoot | E: scan | F1: debug | F2: debris", True, (80, 80, 80))
     hint_rect = hint.get_rect(midbottom=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 10))
     screen.blit(hint, hint_rect)
 
 
 def _draw_debug_hud(screen, clock, spatial, asteroid_pool, shot_pool):
-    """Performance overlay."""
     font = pygame.font.Font(None, 24)
     lines = [
         f"FPS: {clock.get_fps():.1f}",
@@ -225,6 +221,41 @@ def _draw_debug_hud(screen, clock, spatial, asteroid_pool, shot_pool):
         surf = font.render(line, True, (0, 255, 0))
         screen.blit(surf, (10, y))
         y += 20
+
+
+def _draw_debris_info(screen, player, asteroids):
+    """Show real debris info for nearest scanned asteroid."""
+    font = pygame.font.Font(None, 20)
+    
+    # Find nearest scanned asteroid
+    nearest = None
+    nearest_dist = 300
+    for asteroid in asteroids:
+        if not asteroid._scanned or not asteroid.debris_data:
+            continue
+        dist = player.position.distance_to(asteroid.position)
+        if dist < nearest_dist:
+            nearest_dist = dist
+            nearest = asteroid
+    
+    if not nearest:
+        return
+    
+    # Draw info panel
+    data = nearest.debris_data
+    lines = [
+        f"NORAD: {data.get('norad_id', 'N/A')}",
+        f"Name: {data.get('name', 'UNKNOWN')}",
+        f"Type: {data.get('object_type', 'N/A')}",
+        f"Country: {data.get('country', 'N/A')}",
+        f"Launch: {data.get('launch_date', 'N/A')}",
+    ]
+    
+    y = SCREEN_HEIGHT // 2 - 60
+    for line in lines:
+        surf = font.render(line, True, (0, 255, 0))
+        screen.blit(surf, (10, y))
+        y += 22
 
 
 if __name__ == "__main__":
